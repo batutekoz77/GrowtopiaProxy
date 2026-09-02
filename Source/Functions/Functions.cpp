@@ -1,6 +1,13 @@
 ﻿#pragma once
 #include "Functions.hpp"
+
+/* @important: Socks5.hpp brings in winsock2.h, which has to be included
+   before windows.h -- otherwise windows.h pulls in winsock 1.1 and every
+   socket symbol below collides. Keep it above the includes that follow. */
+#include "../Network/Socks5.hpp"
+
 #include "../Logger/Logger.hpp"
+#include "../Main/Config.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -11,6 +18,8 @@
 
 #include <string>
 #include <fstream>
+#include <iostream>
+#include <cstdlib>   /* atoi, for the config parser */
 
 
 bool System::RelaunchAsAdmin() {
@@ -288,4 +297,117 @@ bool Packet::Change(std::string& data, const std::string& starter, size_t startI
     data.replace(start, end - start, newValue);
 
     return true;
+}
+
+
+/* --- SOCKS5 route: configuration and preflight ---------------------------
+
+   Everything here runs before the logger is started and before anything on
+   the machine has been touched, so it talks to the operator with plain
+   cout. That is deliberate: the point of doing this first is to be able to
+   stop with nothing changed. */
+
+namespace {
+
+    std::string TrimSpace(const std::string& s) {
+        const auto b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return "";
+        return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+    }
+
+    Socks5::Config RouteConfig() {
+        Socks5::Config c;
+        c.host = Route.HOST;
+        c.port = Route.PORT;
+        c.user = Route.USER;
+        c.pass = Route.PASS;
+        return c;
+    }
+
+}   /* namespace */
+
+bool System::LoadRouteConfig(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        std::cout << "\n"
+                     "   The SOCKS5 route needs '" << path << "' next to this exe.\n"
+                     "   Create it with:\n"
+                     "\n"
+                     "       host = 203.0.113.10\n"
+                     "       port = 1080\n"
+                     "       user = yourname\n"
+                     "       pass = yourpassword\n"
+                     "\n"
+                     "   Keep it out of git: it holds a password in clear text.\n";
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(f, line)) {
+        line = TrimSpace(line);
+        if (line.empty() || line[0] == '#') continue;
+
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        const std::string k = TrimSpace(line.substr(0, eq));
+        const std::string v = TrimSpace(line.substr(eq + 1));
+
+        if      (k == "host")      Route.HOST = v;
+        else if (k == "user")      Route.USER = v;
+        else if (k == "pass")      Route.PASS = v;
+        else if (k == "port")      Route.PORT      = static_cast<uint16_t>(std::atoi(v.c_str()));
+        else if (k == "http_port") Route.HTTP_PORT = static_cast<uint16_t>(std::atoi(v.c_str()));
+    }
+
+    if (Route.HOST.empty() || Route.PORT == 0 || Route.USER.empty() || Route.PASS.empty()) {
+        std::cout << "\n   '" << path << "' is missing one of: host, port, user, pass.\n";
+        return false;
+    }
+
+    /* @important: never print Route.PASS -- not here, not in an error path,
+       not at any verbosity. Console output ends up in screenshots. */
+    std::cout << "\n   SOCKS5 " << Route.HOST << ":" << Route.PORT
+              << " as '" << Route.USER << "'\n";
+    return true;
+}
+
+bool System::RoutePreflight() {
+    int err = 0;
+    std::cout << "   Checking the server before anything is started...\n";
+
+    const Socks5::Status st = Socks5::Probe(RouteConfig(), 5000, err);
+    if (st == Socks5::Status::Ok) {
+        std::cout << "   OK -- reachable, and the credentials were accepted.\n";
+        return true;
+    }
+
+    std::cout << "\n   SOCKS5 preflight failed: " << Socks5::Explain(st) << "\n\n";
+
+    /* Each of these needs a different fix, so each gets its own advice
+       rather than one message that covers all of them and helps with none. */
+    switch (st) {
+    case Socks5::Status::Unreachable:
+        std::cout << "   Nothing answered on " << Route.HOST << ":" << Route.PORT
+                  << " (socket error " << err << ").\n"
+                     "     1. Is the server up, and the SOCKS5 daemon running on it?\n"
+                     "     2. If the port is restricted to a list of addresses and\n"
+                     "        yours has changed, the server is fine and you are not\n"
+                     "        on the list any more. This is the common one.\n"
+                     "     3. host= and port= in socks5.cfg.\n";
+        break;
+    case Socks5::Status::NoAuthMethod:
+        std::cout << "   It answered, but will not do username/password auth.\n"
+                     "   The network path is fine -- this is server configuration.\n";
+        break;
+    case Socks5::Status::BadCredentials:
+        std::cout << "   It rejected the credentials for user '" << Route.USER << "'.\n"
+                     "   The network path is fine. Fix user= / pass= in socks5.cfg.\n";
+        break;
+    default:
+        std::cout << "   Something is listening there, but it is not a SOCKS5\n"
+                     "   server. Wrong port, most likely.\n";
+        break;
+    }
+    return false;
 }

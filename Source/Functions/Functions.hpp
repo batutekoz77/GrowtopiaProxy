@@ -10,6 +10,16 @@ namespace System {
 	int findProcess(const std::wstring& program);
 	void endProcess(const std::wstring& program);
 	void startProcess(const std::wstring& program);
+
+	/* --- optional SOCKS5 route ---------------------------------------------
+	   Reads socks5.cfg (host/port/user/pass) into the Route config, and proves
+	   the server is both reachable and willing to have us -- before anything
+	   on this machine has been changed, so that failing costs nothing.
+
+	   Both print with cout rather than the logger: they run before the logger
+	   has been started. */
+	bool LoadRouteConfig(const std::string& path);
+	bool RoutePreflight();
 }
 
 namespace Packet {
