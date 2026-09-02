@@ -20,6 +20,11 @@
 #include <fstream>
 #include <iostream>
 #include <cstdlib>   /* atoi, for the config parser */
+#include <atomic>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 
 bool System::RelaunchAsAdmin() {
@@ -324,6 +329,135 @@ namespace {
         return c;
     }
 
+    /* --- local HTTP CONNECT shim --------------------------------------
+
+       cpp-httplib can be pointed at an HTTP proxy but not at a SOCKS5 one,
+       and the server_data.php fetch goes through cpp-httplib. So we put the
+       smallest possible HTTP proxy on loopback: it accepts one CONNECT,
+       opens the matching SOCKS5 CONNECT, answers 200, and then moves bytes.
+
+       This replaces shelling out to a general-purpose tunnelling binary,
+       which is what an earlier version of this did. That approach had two
+       problems that are not fixable from outside: the operator has to obtain
+       and place a second executable, and the credentials have to be written
+       to a config file on disk for it to read. It also outlives us -- if the
+       proxy window is closed the child keeps running, holding the port, and
+       the next start fails to bind for a reason that looks like nothing at
+       all. In-process there is no child to leak. */
+
+    SOCKET            g_shimFd  = INVALID_SOCKET;
+    std::atomic<bool> g_shimRun{ false };
+    std::thread       g_shimThread;
+
+    /* Reads until the blank line that ends the request head. Bounded, because
+       a peer that never sends one must not be able to grow this forever. */
+    bool ReadRequestHead(SOCKET s, std::string& head) {
+        char c = 0;
+        while (head.size() < 8192) {
+            const int n = ::recv(s, &c, 1, 0);
+            if (n <= 0) return false;
+            head.push_back(c);
+            if (head.size() >= 4 && head.compare(head.size() - 4, 4, "\r\n\r\n") == 0)
+                return true;
+        }
+        return false;
+    }
+
+    /* "CONNECT host:port HTTP/1.1" -> host, port. */
+    bool ParseConnect(const std::string& head, std::string& host, uint16_t& port) {
+        if (head.compare(0, 8, "CONNECT ") != 0) return false;
+        const auto sp = head.find(' ', 8);
+        if (sp == std::string::npos) return false;
+
+        const std::string target = head.substr(8, sp - 8);
+        const auto colon = target.rfind(':');
+        if (colon == std::string::npos || colon == 0) return false;
+
+        host = target.substr(0, colon);
+        const int p = std::atoi(target.c_str() + colon + 1);
+        if (p <= 0 || p > 65535) return false;
+        port = static_cast<uint16_t>(p);
+        return true;
+    }
+
+    bool SendText(SOCKET s, const char* text) {
+        return Socks5::SendAll(s, text, static_cast<int>(std::strlen(text)));
+    }
+
+    void Pump(SOCKET a, SOCKET b) {
+        std::vector<char> buf(16 * 1024);
+        for (;;) {
+            fd_set r;
+            FD_ZERO(&r); FD_SET(a, &r); FD_SET(b, &r);
+            timeval tv{ 1, 0 };
+            const int n = ::select(static_cast<int>((a > b ? a : b)) + 1, &r, nullptr, nullptr, &tv);
+            if (n < 0) return;
+            if (n == 0) { if (!g_shimRun) return; continue; }
+
+            if (FD_ISSET(a, &r)) {
+                const int k = ::recv(a, buf.data(), static_cast<int>(buf.size()), 0);
+                if (k <= 0 || !Socks5::SendAll(b, buf.data(), k)) return;
+            }
+            if (FD_ISSET(b, &r)) {
+                const int k = ::recv(b, buf.data(), static_cast<int>(buf.size()), 0);
+                if (k <= 0 || !Socks5::SendAll(a, buf.data(), k)) return;
+            }
+        }
+    }
+
+    void ServeConnect(SOCKET client) {
+        std::string head;
+        std::string host;
+        uint16_t    port = 0;
+
+        if (!ReadRequestHead(client, head) || !ParseConnect(head, host, port)) {
+            SendText(client, "HTTP/1.1 400 Bad Request\r\n\r\n");
+            closesocket(client);
+            return;
+        }
+
+        Socks5::Status st = Socks5::Status::Protocol;
+        int err = 0;
+        const SOCKET up = Socks5::Connect(RouteConfig(), host, port, 10000, st, err);
+        if (up == INVALID_SOCKET) {
+            /* @important: answer, do not just drop. cpp-httplib waiting on a
+               socket that never replies is a hang with no message; a 502 is a
+               failed fetch it reports immediately. */
+            LOG_ERROR("CONNECT {}:{} through the SOCKS5 server failed: {}", host, port, Socks5::Explain(st));
+            SendText(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n");
+            closesocket(client);
+            return;
+        }
+
+        SendText(client, "HTTP/1.1 200 Connection Established\r\n\r\n");
+        Pump(client, up);
+
+        closesocket(up);
+        closesocket(client);
+    }
+
+    void ShimAcceptLoop() {
+        while (g_shimRun) {
+            /* @important: wait in select, not in accept. Closing a listening
+               socket from another thread does not reliably wake a blocked
+               accept -- so StopRoute would join a thread that never returns
+               and the proxy would hang on exit, which is the same "still
+               running, kill it by hand" problem this design exists to avoid.
+               (Written the other way first; it hung.) */
+            fd_set r;
+            FD_ZERO(&r);
+            FD_SET(g_shimFd, &r);
+            timeval tv{ 0, 200000 };
+            if (::select(static_cast<int>(g_shimFd) + 1, &r, nullptr, nullptr, &tv) <= 0)
+                continue;
+
+            const SOCKET c = ::accept(g_shimFd, nullptr, nullptr);
+            if (c == INVALID_SOCKET) continue;
+
+            std::thread(ServeConnect, c).detach();
+        }
+    }
+
 }   /* namespace */
 
 bool System::LoadRouteConfig(const std::string& path) {
@@ -410,4 +544,50 @@ bool System::RoutePreflight() {
         break;
     }
     return false;
+}
+
+bool System::StartConnectShim() {
+    WSADATA wsa{};
+    WSAStartup(MAKEWORD(2, 2), &wsa);   /* refcounted; enet has already called it */
+
+    g_shimFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (g_shimFd == INVALID_SOCKET) {
+        std::cout << "   Could not create the CONNECT shim socket (winsock "
+                  << WSAGetLastError() << ").\n";
+        return false;
+    }
+
+    sockaddr_in la{};
+    la.sin_family = AF_INET;
+    la.sin_port   = htons(Route.HTTP_PORT);
+    ::inet_pton(AF_INET, Route.LOCAL_IP.c_str(), &la.sin_addr);
+
+    if (::bind(g_shimFd, reinterpret_cast<sockaddr*>(&la), sizeof(la)) != 0 ||
+        ::listen(g_shimFd, 8) != 0) {
+        std::cout << "   Could not listen on " << Route.LOCAL_IP << ":" << Route.HTTP_PORT
+                  << " (winsock " << WSAGetLastError() << ").\n"
+                     "   Something else is on that port. Set a different one with\n"
+                     "   http_port = <n> in socks5.cfg.\n";
+        closesocket(g_shimFd);
+        g_shimFd = INVALID_SOCKET;
+        return false;
+    }
+
+    g_shimRun = true;
+    g_shimThread = std::thread(ShimAcceptLoop);
+
+    std::cout << "   CONNECT shim on " << Route.LOCAL_IP << ":" << Route.HTTP_PORT
+              << " -> " << Route.HOST << ":" << Route.PORT << "\n";
+    return true;
+}
+
+void System::StopRoute() {
+    /* @important: this has to run on every exit path, not just the tidy one.
+       See the console control handler in Main.cpp. */
+    g_shimRun = false;
+    if (g_shimThread.joinable()) g_shimThread.join();   /* it polls, so it returns */
+    if (g_shimFd != INVALID_SOCKET) {
+        closesocket(g_shimFd);
+        g_shimFd = INVALID_SOCKET;
+    }
 }

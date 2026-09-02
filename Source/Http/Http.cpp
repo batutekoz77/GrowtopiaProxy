@@ -18,6 +18,14 @@ bool HttpManager::Fetcher() {
     httplib::Client cli("https://www.growtopia2.com");
     cli.enable_server_certificate_verification(false);
 
+    /* @note: cpp-httplib can be pointed at an HTTP proxy but not at a
+       SOCKS5 one, so it is pointed at our own CONNECT shim on loopback,
+       which chains onward. That is the only reason the shim exists. */
+    if (Route.MODE == gRoute::SOCKS5) {
+        cli.set_proxy(Route.LOCAL_IP.c_str(), Route.HTTP_PORT);
+        LOG_INFO("server_data.php fetch routed through {}:{}", Route.HOST, Route.PORT);
+    }
+
     httplib::Headers headers = {
         { "User-Agent", "UbiServices_SDK_2022.Release.9_PC64_ansi_stati" },
         { "Accept", "*/*" }
@@ -57,8 +65,15 @@ bool HttpManager::Fetcher() {
     LOG_DEBUG("loginurl: {}", loginurl);
     LOG_DEBUG("meta: {}", meta);
 
-    Server.IP = server;
-    Server.UDP = std::stoi(port);
+    /* @note: REAL_* is the address server_data.php actually gave us, kept
+       separate because on the SOCKS5 route Server.IP/UDP below are
+       rewritten to a local socket -- and something still has to know
+       where that socket is meant to forward to. */
+    Server.REAL_IP  = server;
+    Server.REAL_UDP = static_cast<uint16_t>(std::stoi(port));
+
+    Server.IP  = Server.REAL_IP;
+    Server.UDP = Server.REAL_UDP;
 
     {
         /* This returned a string literal from a function declared `bool`. The

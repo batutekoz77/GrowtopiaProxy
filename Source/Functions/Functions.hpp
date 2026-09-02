@@ -20,6 +20,15 @@ namespace System {
 	   has been started. */
 	bool LoadRouteConfig(const std::string& path);
 	bool RoutePreflight();
+
+	/* An HTTP CONNECT proxy on loopback that chains to the SOCKS5 server.
+	   It exists because cpp-httplib speaks HTTP proxies but not SOCKS5, and
+	   the server_data.php fetch goes through cpp-httplib. */
+	bool StartConnectShim();
+
+	/* Tears down everything the route owns. Safe to call more than once, and
+	   safe to call when no route was ever started. */
+	void StopRoute();
 }
 
 namespace Packet {
