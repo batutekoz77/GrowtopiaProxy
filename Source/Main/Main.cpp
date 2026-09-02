@@ -8,11 +8,22 @@
 #include <thread>
 
 /* @important: closing the console window, or Ctrl+C, does not run atexit
-   handlers. Without this the route's sockets and threads would be left to
-   the process teardown -- and on the next start the shim would fail to
-   bind for a reason that looks like nothing at all. */
+   handlers -- and those are the two ways this program is normally ended.
+
+   Two things must not survive us:
+
+     the route      its sockets and threads. On the next start the shim
+                    would fail to bind, for a reason that looks like
+                    nothing at all.
+
+     the hosts file while the proxy runs it points www.growtopia1.com and
+                    www.growtopia2.com at 127.0.0.1. Left that way, the
+                    real game cannot reach Growtopia at all, and nothing
+                    says why -- the operator is left editing a system file
+                    by hand to get their game back. */
 static BOOL WINAPI OnConsoleEvent(DWORD) {
     System::StopRoute();
+    System::editHosts("");
     return FALSE;   /* let the default handler finish terminating us */
 }
 
@@ -22,6 +33,7 @@ auto main() -> int {
         return EXIT_FAILURE;
     }
     System::EnableDebugPrivilege();
+    SetConsoleCtrlHandler(OnConsoleEvent, TRUE);
     
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetProcessPriorityBoost(GetCurrentProcess(), TRUE);
@@ -53,7 +65,6 @@ auto main() -> int {
         }
 
         atexit([] { System::StopRoute(); });
-        SetConsoleCtrlHandler(OnConsoleEvent, TRUE);
 
         std::cout << "\n"
                      "   Route: SOCKS5\n"
@@ -94,6 +105,11 @@ auto main() -> int {
     network_thread.join();
     
     LOG_WARN("All threads finished");
+
+    /* Explicit rather than atexit: both of these want the logger, and
+       atexit handlers run after it has been stopped. */
+    System::StopRoute();
+    System::editHosts("");
 
     FastLog::Logger::instance().stop();
 
