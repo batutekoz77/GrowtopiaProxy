@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -458,7 +459,179 @@ namespace {
         }
     }
 
+    /* --- SOCKS5 UDP association: the ENet game session ------------------
+
+       RFC 1928 section 7. The client holds a TCP control connection, the
+       server hands back a UDP endpoint, and every datagram is prefixed with
+       a 10-byte header naming the real destination.
+
+       Three sockets, and which of them may move matters:
+
+         control  the TCP connection. The association lives exactly as long
+                  as this does.
+         up       faces the SOCKS5 relay. Created ONCE and never replaced --
+                  see the note on the source port below.
+         down     faces ENet on loopback. Rebound when the game server port
+                  changes, which is the only thing that can move.
+
+       @important: `down` binds the SAME port number the game server uses.
+       That looks arbitrary and is not. Growtopia's ENet fork encodes the
+       destination port into the packet header and the receiver checks it
+       against its own port; a mismatch is dropped silently, with no error on
+       either side. A relay on a port of its own convenience therefore
+       produces a connection that simply never completes.
+
+       @important: the source port facing the relay must not change either.
+       An ENet peer is pinned to the address its CONNECT arrived from and
+       rejects packets from any other, so re-opening `up` mid-session breaks
+       it. This is why a general-purpose UDP forwarder does not work here:
+       one that opens a fresh association per burst gets a new source port
+       each time, and the game server stops answering. Holding one
+       association ourselves keeps the far side on a single socket. */
+
+    Socks5::Association g_udp;
+    SOCKET      g_udpUp    = INVALID_SOCKET;
+    SOCKET      g_udpDown  = INVALID_SOCKET;
+    sockaddr_in g_udpClient{};
+    bool        g_udpHaveClient = false;
+    uint8_t     g_udpHdr[10]    = { 0, 0, 0, 1, 0, 0, 0, 0, 0, 0 };
+    uint16_t    g_udpPort  = 0;
+    std::mutex  g_udpMtx;
+    std::atomic<bool> g_udpRun { false };
+    std::atomic<bool> g_udpDead{ false };
+    std::thread g_udpThread;
+
+    bool BindDownSocket(uint16_t port) {
+        SOCKET s = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (s == INVALID_SOCKET) return false;
+
+        sockaddr_in la{};
+        la.sin_family = AF_INET;
+        la.sin_port   = htons(port);
+        ::inet_pton(AF_INET, Route.LOCAL_IP.c_str(), &la.sin_addr);
+
+        if (::bind(s, reinterpret_cast<sockaddr*>(&la), sizeof(la)) != 0) {
+            LOG_ERROR("SOCKS5 UDP: cannot bind {}:{} (winsock {})",
+                      Route.LOCAL_IP, port, WSAGetLastError());
+            closesocket(s);
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(g_udpMtx);
+        if (g_udpDown != INVALID_SOCKET) closesocket(g_udpDown);
+        g_udpDown = s;
+        g_udpPort = port;
+        g_udpHaveClient = false;   /* new port, so a new ENet socket to learn */
+        return true;
+    }
+
+    void UdpLoop() {
+        std::vector<char> in(4096), out(4096 + 10);
+
+        while (g_udpRun) {
+            SOCKET down, up, ctl;
+            {
+                std::lock_guard<std::mutex> lock(g_udpMtx);
+                down = g_udpDown; up = g_udpUp; ctl = g_udp.control;
+            }
+            if (down == INVALID_SOCKET || up == INVALID_SOCKET) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+
+            fd_set r;
+            FD_ZERO(&r);
+            FD_SET(down, &r);
+            FD_SET(up, &r);
+            if (ctl != INVALID_SOCKET) FD_SET(ctl, &r);
+
+            SOCKET mx = down > up ? down : up;
+            if (ctl != INVALID_SOCKET && ctl > mx) mx = ctl;
+
+            timeval tv{ 0, 200000 };   /* short, so a retarget is picked up promptly */
+            if (::select(static_cast<int>(mx) + 1, &r, nullptr, nullptr, &tv) <= 0) continue;
+
+            /* @important: the control connection has to be watched, not just
+               held. When it closes, the relay stops forwarding and nothing
+               else changes: the UDP sockets stay open, every send still
+               succeeds, and the datagrams go nowhere. The symptom is a
+               session that freezes with no error anywhere, which looks
+               exactly like the game server having gone quiet. */
+            if (ctl != INVALID_SOCKET && FD_ISSET(ctl, &r)) {
+                char discard = 0;
+                if (::recv(ctl, &discard, 1, 0) <= 0) {
+                    LOG_ERROR("SOCKS5 UDP: the server closed the control connection.");
+                    LOG_ERROR("The association is gone; the session would stall silently.");
+                    g_udpDead = true;
+                    g_udpRun  = false;
+                    break;
+                }
+            }
+
+            if (FD_ISSET(down, &r)) {          /* ENet -> relay -> game server */
+                sockaddr_in from{};
+#ifdef _WIN32
+                int fl = sizeof(from);
+#else
+                socklen_t fl = sizeof(from);
+#endif
+                const int k = ::recvfrom(down, in.data(), static_cast<int>(in.size()), 0,
+                                         reinterpret_cast<sockaddr*>(&from), &fl);
+                if (k > 0) {
+                    sockaddr_in relay;
+                    {
+                        std::lock_guard<std::mutex> lock(g_udpMtx);
+                        g_udpClient = from;
+                        g_udpHaveClient = true;
+                        std::memcpy(out.data(), g_udpHdr, sizeof(g_udpHdr));
+                        relay = g_udp.relay;
+                    }
+                    std::memcpy(out.data() + 10, in.data(), k);
+                    ::sendto(up, out.data(), k + 10, 0,
+                             reinterpret_cast<sockaddr*>(&relay), sizeof(relay));
+                }
+            }
+
+            if (FD_ISSET(up, &r)) {            /* game server -> relay -> ENet */
+                const int k = ::recvfrom(up, in.data(), static_cast<int>(in.size()), 0, nullptr, nullptr);
+                sockaddr_in cl{};
+                bool have = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_udpMtx);
+                    have = g_udpHaveClient;
+                    cl   = g_udpClient;
+                }
+                /* @important: strip the 10-byte header. ENet must never see
+                   it -- the packet would fail its checksum and be dropped
+                   with nothing logged. */
+                if (k > 10 && have)
+                    ::sendto(down, in.data() + 10, k - 10, 0,
+                             reinterpret_cast<sockaddr*>(&cl), sizeof(cl));
+            }
+        }
+    }
+
 }   /* namespace */
+
+int System::ChooseRoute() {
+    std::cout << "\n"
+                 "  ==========================================================\n"
+                 "   How should this proxy reach Growtopia?\n"
+                 "\n"
+                 "     [0]  Direct        straight out from this PC (default)\n"
+                 "     [1]  SOCKS5        through the server in socks5.cfg\n"
+                 "  ==========================================================\n"
+                 "\n"
+                 "   Choice [0]: ";
+
+    std::string line;
+    std::getline(std::cin, line);
+    line = TrimSpace(line);
+
+    /* Anything unrecognised means direct. The safe answer is the one that
+       does not claim to be routing when it is not. */
+    return (line == "1") ? gRoute::SOCKS5 : gRoute::DIRECT;
+}
 
 bool System::LoadRouteConfig(const std::string& path) {
     std::ifstream f(path);
@@ -581,9 +754,92 @@ bool System::StartConnectShim() {
     return true;
 }
 
+bool System::Socks5UdpStart(const std::string& dstIp, uint16_t dstPort) {
+    if (g_udpRun) return Socks5UdpRetarget(dstIp, dstPort);
+
+    int err = 0;
+    const Socks5::Status st = Socks5::Associate(RouteConfig(), 8000, g_udp, err);
+    if (st != Socks5::Status::Ok) {
+        LOG_ERROR("SOCKS5 UDP: ASSOCIATE failed -- {}", Socks5::Explain(st));
+        if (st == Socks5::Status::Refused)
+            LOG_ERROR("The server is up but will not do UDP. Enable UDP relaying on it.");
+        Socks5UdpStop();
+        return false;
+    }
+
+    /* @note: a control connection nothing ever writes to is a candidate for
+       an idle timeout somewhere along the path. Keepalive costs nothing. */
+    {
+        int on = 1;
+        ::setsockopt(g_udp.control, SOL_SOCKET, SO_KEEPALIVE,
+                     reinterpret_cast<const char*>(&on), sizeof(on));
+    }
+
+    g_udpUp = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_udpUp == INVALID_SOCKET) {
+        LOG_ERROR("SOCKS5 UDP: no socket (winsock {})", WSAGetLastError());
+        Socks5UdpStop();
+        return false;
+    }
+
+    Socks5::MakeUdpHeader(g_udpHdr, dstIp, dstPort);
+    if (!BindDownSocket(dstPort)) { Socks5UdpStop(); return false; }
+
+    g_udpDead = false;
+    g_udpRun  = true;
+    g_udpThread = std::thread(UdpLoop);
+
+    {
+        char b[64] = {};
+        ::inet_ntop(AF_INET, &g_udp.relay.sin_addr, b, sizeof(b));
+        LOG_INFO("SOCKS5 UDP association up via {}:{}", b, ntohs(g_udp.relay.sin_port));
+    }
+    LOG_INFO("ENet -> {}:{} -> (socks5) -> {}:{}", Route.LOCAL_IP, dstPort, dstIp, dstPort);
+    return true;
+}
+
+bool System::Socks5UdpRetarget(const std::string& dstIp, uint16_t dstPort) {
+    if (g_udpDead) {
+        /* Rebuild rather than retarget: the old sockets are still open and
+           would swallow everything without a word. */
+        LOG_WARN("SOCKS5 UDP: the association was lost -- opening a new one.");
+        Socks5UdpStop();
+        return Socks5UdpStart(dstIp, dstPort);
+    }
+    if (!g_udpRun) return Socks5UdpStart(dstIp, dstPort);
+
+    {
+        std::lock_guard<std::mutex> lock(g_udpMtx);
+        Socks5::MakeUdpHeader(g_udpHdr, dstIp, dstPort);
+    }
+
+    /* The local port follows the server's, for the reason in the block
+       comment above: the port number is checked inside the packet. The
+       association and its source port are untouched -- only the socket ENet
+       talks to moves. */
+    if (dstPort != g_udpPort && !BindDownSocket(dstPort)) return false;
+
+    LOG_INFO("SOCKS5 UDP retargeted -> {}:{}", dstIp, dstPort);
+    return true;
+}
+
+void System::Socks5UdpStop() {
+    g_udpRun = false;
+    if (g_udpThread.joinable()) g_udpThread.join();
+
+    std::lock_guard<std::mutex> lock(g_udpMtx);
+    if (g_udpDown != INVALID_SOCKET)     { closesocket(g_udpDown);     g_udpDown = INVALID_SOCKET; }
+    if (g_udpUp   != INVALID_SOCKET)     { closesocket(g_udpUp);       g_udpUp   = INVALID_SOCKET; }
+    if (g_udp.control != INVALID_SOCKET) { closesocket(g_udp.control); g_udp.control = INVALID_SOCKET; }
+    g_udpPort = 0;
+    g_udpHaveClient = false;
+}
+
 void System::StopRoute() {
     /* @important: this has to run on every exit path, not just the tidy one.
        See the console control handler in Main.cpp. */
+    Socks5UdpStop();
+
     g_shimRun = false;
     if (g_shimThread.joinable()) g_shimThread.join();   /* it polls, so it returns */
     if (g_shimFd != INVALID_SOCKET) {

@@ -18,6 +18,11 @@ namespace System {
 
 	   Both print with cout rather than the logger: they run before the logger
 	   has been started. */
+	/* Asks at startup, with plain cout/cin: the logger is not running yet.
+	   Anything other than "1" means direct -- the answer that cannot lie
+	   about being routed. */
+	int ChooseRoute();
+
 	bool LoadRouteConfig(const std::string& path);
 	bool RoutePreflight();
 
@@ -25,6 +30,18 @@ namespace System {
 	   It exists because cpp-httplib speaks HTTP proxies but not SOCKS5, and
 	   the server_data.php fetch goes through cpp-httplib. */
 	bool StartConnectShim();
+
+	/* --- the ENet game session ---------------------------------------------
+	   Carries it inside a SOCKS5 UDP association, so nothing has to be
+	   installed on the machine and no tunnel has to be configured.
+
+	   Start once, when server_data.php has said where the game server is.
+	   Retarget follows the sub-server redirect that arrives after login: with
+	   the destination in a per-datagram header, that is a header rewrite
+	   rather than a route change. */
+	bool Socks5UdpStart(const std::string& dstIp, uint16_t dstPort);
+	bool Socks5UdpRetarget(const std::string& dstIp, uint16_t dstPort);
+	void Socks5UdpStop();
 
 	/* Tears down everything the route owns. Safe to call more than once, and
 	   safe to call when no route was ever started. */

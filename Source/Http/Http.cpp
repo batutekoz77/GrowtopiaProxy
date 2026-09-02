@@ -72,8 +72,28 @@ bool HttpManager::Fetcher() {
     Server.REAL_IP  = server;
     Server.REAL_UDP = static_cast<uint16_t>(std::stoi(port));
 
-    Server.IP  = Server.REAL_IP;
-    Server.UDP = Server.REAL_UDP;
+    if (Route.MODE == gRoute::SOCKS5) {
+        /* @important: fail closed. Falling back to a direct dial here would
+           put the game session on this machine's own address while the
+           operator believes it is routed -- worse than not starting. */
+        if (!System::Socks5UdpStart(Server.REAL_IP, Server.REAL_UDP)) {
+            LOG_ERROR("Could not carry the game session through the SOCKS5 server.");
+            return false;
+        }
+
+        /* Everything downstream -- the enet_address_set_host_ip below and
+           NetworkManager::Setup -- reads Server.IP/UDP, so pointing those
+           at our local socket routes ENet without either of them needing
+           to know a route exists. The port is passed through unchanged
+           because the game checks it against the value carried inside the
+           packet header. */
+        Server.IP  = Route.LOCAL_IP;
+        Server.UDP = Server.REAL_UDP;
+    }
+    else {
+        Server.IP  = Server.REAL_IP;
+        Server.UDP = Server.REAL_UDP;
+    }
 
     {
         /* This returned a string literal from a function declared `bool`. The

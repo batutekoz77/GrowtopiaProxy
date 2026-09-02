@@ -2,8 +2,19 @@
 #include "../Functions/Functions.hpp"
 #include "../Http/Http.hpp"
 #include "../Network/Network.hpp"
+#include "../Main/Config.hpp"
 
+#include <iostream>
 #include <thread>
+
+/* @important: closing the console window, or Ctrl+C, does not run atexit
+   handlers. Without this the route's sockets and threads would be left to
+   the process teardown -- and on the next start the shim would fail to
+   bind for a reason that looks like nothing at all. */
+static BOOL WINAPI OnConsoleEvent(DWORD) {
+    System::StopRoute();
+    return FALSE;   /* let the default handler finish terminating us */
+}
 
 auto main() -> int {
     if (!System::IsTrueAdmin() && !System::RelaunchAsAdmin()) {
@@ -20,6 +31,42 @@ auto main() -> int {
         return -1;
     }
     atexit(enet_deinitialize);
+
+    /* @important: the route is decided here, before Growtopia.exe is
+       killed and before the hosts file is written. If any part of it
+       cannot be brought up we stop, and stopping at this point has cost
+       the operator nothing. We never quietly continue direct: an operator
+       acting on the belief that they are routed when they are not is the
+       worst outcome available here. */
+    Route.MODE = System::ChooseRoute();
+
+    if (Route.MODE == gRoute::SOCKS5) {
+        if (!System::LoadRouteConfig("socks5.cfg") ||
+            !System::RoutePreflight() ||
+            !System::StartConnectShim()) {
+            System::StopRoute();
+            std::cout << "\n"
+                         "   Stopping. Nothing on this PC was changed:\n"
+                         "   Growtopia.exe was not touched and the hosts file\n"
+                         "   was not modified.\n\n";
+            return EXIT_FAILURE;
+        }
+
+        atexit([] { System::StopRoute(); });
+        SetConsoleCtrlHandler(OnConsoleEvent, TRUE);
+
+        std::cout << "\n"
+                     "   Route: SOCKS5\n"
+                     "\n"
+                     "   What is routed:   the server_data.php fetch, and the\n"
+                     "                     ENet game session.\n"
+                     "   What is NOT:      the game client opens the login page\n"
+                     "                     itself. That request never reaches this\n"
+                     "                     process, so it still goes out directly.\n\n";
+    }
+    else {
+        std::cout << "\n   Route: DIRECT\n\n";
+    }
 
     if (System::findProcess(L"Growtopia.exe")) {
         System::endProcess(L"Growtopia.exe");
