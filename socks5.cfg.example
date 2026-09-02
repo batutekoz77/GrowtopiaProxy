@@ -1,0 +1,52 @@
+# socks5.cfg.example
+#
+# Copy this next to Source.exe, rename it to  socks5.cfg , and fill it in.
+# It is read only when you pick route [1] at startup.
+#
+# WARNING: this file holds a password in clear text. Keep it out of git and
+# out of any shared folder. The repository's .gitignore already excludes
+# socks5.cfg for that reason -- do not remove that line.
+#
+# Nothing here is compiled into the proxy. The password is never written to
+# the log or printed to the console, including on the error paths.
+
+# --- required ------------------------------------------------------------
+
+host = 203.0.113.10
+port = 1080
+user = yourname
+pass = yourpassword
+
+# --- optional ------------------------------------------------------------
+
+# Local port for the CONNECT shim the proxy opens for its own HTTP fetch.
+# Change it only if something else already has this port.
+# http_port = 18080
+
+# --- what the server has to support --------------------------------------
+#
+# 1. Username/password authentication (RFC 1929). The proxy offers that
+#    method and nothing else -- a server that would have taken it
+#    anonymously is refused rather than silently used.
+#
+# 2. UDP ASSOCIATE (RFC 1928 section 7). The game session is UDP. Without
+#    it the proxy starts, fetches the server list, and then reports that
+#    the server will not do UDP.
+#
+#    On gost this is  metadata: udp: true  on the service.
+#    On 3proxy and Dante it is on by default.
+#
+# --- what is routed, and what is not -------------------------------------
+#
+#   routed      the server_data.php fetch (TCP), and the ENet game session
+#               (UDP), including the sub-server redirect after login.
+#
+#   NOT routed  the login page. The game client opens that itself, to the
+#               'loginurl' address, and that request never reaches this
+#               process -- the hosts file does not redirect it. It goes out
+#               from this machine directly.
+#
+# So with this on, the login and the game session arrive from two different
+# addresses. That is a real difference from playing normally, it is visible
+# from the other side, and no setting here changes it. Read Docs/socks5.md
+# before deciding whether that trade is one you want.

@@ -36,7 +36,7 @@ Server -> Proxy -> Client
     - [x] Modifying the real-time packets
     - [x] Creating and sending custom packets
 - [x] Lua Script Support
-- [ ] Custom Socks5 Support
+- [x] Custom Socks5 Support (optional, see [Docs/socks5.md](Docs/socks5.md))
 - [x] Advanced log system
 
 ---
@@ -474,6 +474,22 @@ end
 -- The proxy will ignore it and log a warning.
 -- Use /stop first, then /execute the new script.
 ```
+
+---
+
+## 🧦 Optional: SOCKS5 routing
+
+Choose route `[1]` at startup and the proxy sends its own traffic -- the
+server_data.php fetch and the ENet game session -- through a SOCKS5 server.
+Nothing extra to install: no second executable, no tunnel, no child process
+left behind when you close the window.
+
+Copy `socks5.cfg.example` next to `Source.exe`, rename it to `socks5.cfg`,
+and fill it in. The server needs username/password auth and UDP ASSOCIATE.
+
+The login page is **not** routed -- the client opens that itself -- so the
+login and the game session arrive from two different addresses. Read
+[Docs/socks5.md](Docs/socks5.md) before turning it on.
 
 ---
 
