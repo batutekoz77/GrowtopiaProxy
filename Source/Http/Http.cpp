@@ -4,6 +4,7 @@
 #include "../Functions/Functions.hpp"
 #include "../Network/Network.hpp"
 
+#include <exception>   /* std::exception_ptr, for the handler-threw log */
 #include <thread>
 #include <chrono>
 
@@ -183,6 +184,38 @@ void HttpManager::Injector() {
             res.set_content("Internal Server Error: No server data available.", "text/plain");
         }
         else res.set_content(server_data_cache, "text/plain");
+    });
+
+    /* @important: a request that reaches us and matches no handler is
+       answered 404 by cpp-httplib itself, and nothing is logged. From the
+       log that is indistinguishable from a request that never arrived --
+       and those two have nothing to do with each other. One is a routing
+       or hosts-file problem, the other is a missing handler here.
+
+       set_logger runs for every completed request whatever happened, so
+       the difference is visible instead of guessed at. It is also the only
+       way to see what the game asks for that this does not serve, which is
+       most of the point of running a proxy in front of it. */
+    svr.set_logger([](const Request& req, const Response& res) {
+        FastLog::Logger::set_thread_name("HTTP");
+
+        const std::string host = req.get_header_value("Host");
+        LOG_INFO("[HTTPD] {} {} {} -> {}",
+                 host.empty() ? "-" : host.c_str(), req.method, req.path, res.status);
+    });
+
+    /* A throw inside a handler otherwise becomes a bare 500 with nothing
+       said anywhere about what threw. */
+    svr.set_exception_handler([](const Request& req, Response& res, std::exception_ptr ep) {
+        FastLog::Logger::set_thread_name("HTTP");
+
+        std::string what = "unknown";
+        try { if (ep) std::rethrow_exception(ep); }
+        catch (const std::exception& e) { what = e.what(); }
+        catch (...) {}
+
+        LOG_ERROR("[HTTPD] handler threw on {} {}: {}", req.method, req.path, what);
+        res.status = 500;
     });
 
     LOG_INFO("Started HTTP server");

@@ -121,6 +121,41 @@ that address. Pick another loopback address with `login_ip = 127.0.0.3`.
 
 ---
 
+## Reading the log
+
+Every request the proxy's own HTTP server completes is logged, including the
+ones no handler matched:
+
+```
+[HTTPD] www.growtopia2.com POST /growtopia/server_data.php -> 200
+```
+
+That line is worth more than it looks. Without it, "the request never reached
+us" and "it reached us and we answered 404" look identical from the log — and
+they are unrelated problems. A `404` there means the game asked this proxy for
+something it does not serve; no line at all means the request never arrived,
+which is a hosts-file, DNS-cache or TLS problem instead.
+
+A working SOCKS5 start looks like this:
+
+```
+[HTTP] Request: /growtopia/server_data.php
+[HTTP] server_data.php fetch routed through 203.0.113.10:1080
+[HTTP] Login page login.example.com -> 127.0.0.2:443 -> (socks5) -> login.example.com:443
+[HTTP] SOCKS5 UDP association up via 203.0.113.10:45863
+[HTTP] ENet -> 127.0.0.1:17045 -> (socks5) -> 198.51.100.7:17045
+[HTTP] Fetched the api www.growtopia2.com
+[HTTPD] www.growtopia2.com POST /growtopia/server_data.php -> 200
+```
+
+If the login page then fails with a 404 **from this proxy**, the `[HTTPD]`
+line names the host and path it asked for, which says immediately whether the
+login host is resolving here when it should not be. A stale hosts entry or a
+cached DNS answer from an earlier run does exactly that; `ipconfig /flushdns`
+clears the second one.
+
+---
+
 ## Things worth knowing
 
 **Your session arrives from the proxy's address.** Whatever reputation that
