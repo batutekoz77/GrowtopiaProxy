@@ -1,0 +1,69 @@
+# socks5.cfg.example
+#
+# Copy this next to Source.exe, rename it to  socks5.cfg , and fill it in.
+# It is read only when you pick route [1] at startup.
+#
+# WARNING: this file holds a password in clear text. Keep it out of git and
+# out of any shared folder. The repository's .gitignore already excludes
+# socks5.cfg for that reason -- do not remove that line.
+#
+# Nothing here is compiled into the proxy. The password is never written to
+# the log or printed to the console, including on the error paths.
+
+# --- required ------------------------------------------------------------
+
+host = 203.0.113.10
+port = 1080
+user = yourname
+pass = yourpassword
+
+# --- optional ------------------------------------------------------------
+
+# Local port for the CONNECT shim the proxy opens for its own HTTP fetch.
+# Change it only if something else already has this port.
+# http_port = 18080
+
+# The login page. On by default: the client opens it itself, so the proxy
+# makes the login host resolve to a second loopback address and forwards the
+# connection through the same SOCKS5 server. It is forwarded, not decrypted --
+# no certificate is installed and the proxy cannot read what goes through it.
+#
+# Set this to 0 and the login goes out from this machine while the game
+# session comes from the SOCKS5 server, which is one account showing up in
+# two places. Turn it off deliberately, not by accident.
+#
+# Private servers: many have no login page, and some put an address rather
+# than a name in 'loginurl'. An address cannot be redirected by the hosts
+# file, so use login_route = 0 for those.
+# login_route = 0
+
+# Where the login relay listens. Any loopback address that is not 127.0.0.1
+# (which the proxy's own HTTPS server already has). Change it only on a clash.
+# login_ip   = 127.0.0.2
+# login_port = 443
+
+# --- what the server has to support --------------------------------------
+#
+# 1. Username/password authentication (RFC 1929). The proxy offers that
+#    method and nothing else -- a server that would have taken it
+#    anonymously is refused rather than silently used.
+#
+# 2. UDP ASSOCIATE (RFC 1928 section 7). The game session is UDP. Without
+#    it the proxy starts, fetches the server list, and then reports that
+#    the server will not do UDP.
+#
+#    On gost this is  metadata: udp: true  on the service.
+#    On 3proxy and Dante it is on by default.
+#
+# --- what is routed, and what is not -------------------------------------
+#
+#   routed      the server_data.php fetch (TCP), the ENet game session (UDP)
+#               including the sub-server redirect after login, and the login
+#               page (TCP, forwarded without being decrypted).
+#
+#   NOT routed  anything else this machine does. This is a route for the
+#               proxy's own traffic, not a system-wide one.
+#
+# Your session arrives from the SOCKS5 server's address, so whatever
+# reputation that address has is attached to your play. Read Docs/socks5.md
+# before deciding whether that trade is one you want.

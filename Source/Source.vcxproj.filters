@@ -32,5 +32,6 @@
     <ClInclude Include="Network\NET_MESSAGE_GENERIC_TEXT\PROXY_DIALOGS.hpp" />
     <ClInclude Include="Network\NET_MESSAGE_GENERIC_TEXT\WRENCH.hpp" />
     <ClInclude Include="Lua\Lua.hpp" />
+    <ClInclude Include="Network\Socks5.hpp" />
   </ItemGroup>
 </Project>

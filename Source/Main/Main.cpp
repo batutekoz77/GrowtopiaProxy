@@ -2,8 +2,30 @@
 #include "../Functions/Functions.hpp"
 #include "../Http/Http.hpp"
 #include "../Network/Network.hpp"
+#include "../Main/Config.hpp"
 
+#include <iostream>
 #include <thread>
+
+/* @important: closing the console window, or Ctrl+C, does not run atexit
+   handlers -- and those are the two ways this program is normally ended.
+
+   Two things must not survive us:
+
+     the route      its sockets and threads. On the next start the shim
+                    would fail to bind, for a reason that looks like
+                    nothing at all.
+
+     the hosts file while the proxy runs it points www.growtopia1.com and
+                    www.growtopia2.com at 127.0.0.1. Left that way, the
+                    real game cannot reach Growtopia at all, and nothing
+                    says why -- the operator is left editing a system file
+                    by hand to get their game back. */
+static BOOL WINAPI OnConsoleEvent(DWORD) {
+    System::StopRoute();
+    System::editHosts("");
+    return FALSE;   /* let the default handler finish terminating us */
+}
 
 auto main() -> int {
     if (!System::IsTrueAdmin() && !System::RelaunchAsAdmin()) {
@@ -11,6 +33,7 @@ auto main() -> int {
         return EXIT_FAILURE;
     }
     System::EnableDebugPrivilege();
+    SetConsoleCtrlHandler(OnConsoleEvent, TRUE);
     
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetProcessPriorityBoost(GetCurrentProcess(), TRUE);
@@ -20,6 +43,54 @@ auto main() -> int {
         return -1;
     }
     atexit(enet_deinitialize);
+
+    /* @important: the route is decided here, before Growtopia.exe is
+       killed and before the hosts file is written. If any part of it
+       cannot be brought up we stop, and stopping at this point has cost
+       the operator nothing. We never quietly continue direct: an operator
+       acting on the belief that they are routed when they are not is the
+       worst outcome available here. */
+    Route.MODE = System::ChooseRoute();
+
+    if (Route.MODE == gRoute::SOCKS5) {
+        if (!System::LoadRouteConfig("socks5.cfg") ||
+            !System::RoutePreflight() ||
+            !System::StartConnectShim()) {
+            System::StopRoute();
+            std::cout << "\n"
+                         "   Stopping. Nothing on this PC was changed:\n"
+                         "   Growtopia.exe was not touched and the hosts file\n"
+                         "   was not modified.\n\n";
+            return EXIT_FAILURE;
+        }
+
+        atexit([] { System::StopRoute(); });
+
+        std::cout << "\n"
+                     "   Route: SOCKS5\n"
+                     "\n";
+
+        if (Route.LOGIN) {
+            std::cout << "   What is routed:   the server_data.php fetch, the ENet\n"
+                         "                     game session, and the login page the\n"
+                         "                     client opens for itself.\n"
+                         "   The login page:   forwarded byte for byte, never\n"
+                         "                     decrypted. This proxy holds no\n"
+                         "                     certificate for it and cannot read it.\n"
+                         "                     login_route = 0 leaves it alone.\n\n";
+        }
+        else {
+            std::cout << "   What is routed:   the server_data.php fetch, and the\n"
+                         "                     ENet game session.\n"
+                         "   What is NOT:      the login page -- login_route = 0. The\n"
+                         "                     client opens it itself, so it goes out\n"
+                         "                     from this PC while the game session\n"
+                         "                     comes from somewhere else.\n\n";
+        }
+    }
+    else {
+        std::cout << "\n   Route: DIRECT\n\n";
+    }
 
     if (System::findProcess(L"Growtopia.exe")) {
         System::endProcess(L"Growtopia.exe");
@@ -47,6 +118,11 @@ auto main() -> int {
     network_thread.join();
     
     LOG_WARN("All threads finished");
+
+    /* Explicit rather than atexit: both of these want the logger, and
+       atexit handlers run after it has been stopped. */
+    System::StopRoute();
+    System::editHosts("");
 
     FastLog::Logger::instance().stop();
 

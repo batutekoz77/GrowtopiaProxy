@@ -26,6 +26,15 @@ struct gServer {
 	/* @important: Fetching from www.growtopia2.com(do not change) */
 	std::string IP = ""; // empty if real gt
 	uint16_t UDP = -1; // -1 if real gt
+
+	/* @note: the REAL endpoint from server_data.php, always. On the SOCKS5
+	   route IP/UDP above are rewritten to a local socket, so that Http.cpp
+	   and NetworkManager::Setup both dial the route without either having
+	   to know a route exists -- but something still has to remember where
+	   the route is supposed to forward to, and that is these two.
+	   Equal to IP/UDP on the direct route. */
+	std::string REAL_IP = "";
+	uint16_t REAL_UDP = 0;
 };
 inline gServer Server;
 
@@ -36,6 +45,53 @@ struct gClient {
     std::string PLATFORM = "0,1,1"; /* @info: Don't change if you are on 'Windows' */
 };
 inline gClient Client;
+
+
+/* @note: optional. Sends the proxy's own traffic through a SOCKS5 server
+   instead of straight out: the server_data.php fetch over TCP, the ENet
+   game session over UDP, and the login page the client opens for itself.
+
+   The login page is the odd one out. It is not a call this process makes,
+   so there is nothing here to point at the route -- it is reached by making
+   the name resolve to us and forwarding the bytes on. See LOGIN below. */
+struct gRoute {
+    enum Mode { DIRECT = 0, SOCKS5 = 1 };
+    int MODE = DIRECT;
+
+    /* @important: read at runtime from 'socks5.cfg' next to the exe. Nothing
+       here is compiled in, least of all PASS. See System::LoadRouteConfig. */
+    std::string HOST = "";
+    uint16_t    PORT = 0;
+    std::string USER = "";
+    std::string PASS = "";
+
+    /* Local endpoints the proxy opens for itself. Change only on a clash. */
+    std::string LOCAL_IP  = "127.0.0.1";
+    uint16_t    HTTP_PORT = 18080;   /* CONNECT shim, for the server_data fetch */
+
+    /* --- the login page ---------------------------------------------------
+       The client opens the 'loginurl' address itself, so no call inside this
+       process can be pointed at the route. Left alone, the login token is
+       issued to this machine's address while the game session arrives from
+       the SOCKS5 server's -- two different places for one account.
+
+       The one lever available is name resolution. The hosts file is already
+       ours, so the login host is pointed at LOGIN_IP and a relay there
+       forwards the connection on through the same SOCKS5 server.
+
+       @important: the relay does not terminate TLS and holds no certificate.
+       The client handshakes end to end with the real login server and checks
+       the real certificate, so nothing has to be installed and this process
+       cannot read what it is carrying.
+
+       LOGIN_IP is a second loopback address because 127.0.0.1:443 is already
+       taken by the proxy's own HTTPS server. Windows routes all of 127/8 to
+       the loopback interface, so no configuration is needed for this. */
+    bool        LOGIN      = true;
+    std::string LOGIN_IP   = "127.0.0.2";
+    uint16_t    LOGIN_PORT = 443;
+};
+inline gRoute Route;
 
 
 inline bool ShouldLogNetMessage(int type, int extra = 0) {
