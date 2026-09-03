@@ -43,6 +43,26 @@ namespace System {
 	bool Socks5UdpRetarget(const std::string& dstIp, uint16_t dstPort);
 	void Socks5UdpStop();
 
+	/* --- the login page ----------------------------------------------------
+	   The client opens it itself, to the 'loginurl' address, so it is reached
+	   by name resolution rather than by a call: the host is pointed at
+	   Route.LOGIN_IP in the hosts file and this relay forwards the connection
+	   through the SOCKS5 server.
+
+	   It never terminates TLS. The client's handshake runs end to end with the
+	   real login server, which is why no certificate has to be installed and
+	   why this process cannot read the password going through it.
+
+	   Takes the raw 'loginurl' value: a bare name, or a URL if the server
+	   sends one. Calling it again with a different address retargets. */
+	bool StartLoginRelay(const std::string& loginurl);
+	void StopLoginRelay();
+
+	/* The host the relay is currently listening for, empty when it is not
+	   running. editHosts uses this so that the hosts file can never name a
+	   host nothing is answering for. */
+	std::string LoginRelayHost();
+
 	/* Tears down everything the route owns. Safe to call more than once, and
 	   safe to call when no route was ever started. */
 	void StopRoute();

@@ -16,16 +16,42 @@ close the window.
 | `server_data.php` fetch | TCP | **yes**, through an HTTP CONNECT shim on loopback |
 | ENet game session | UDP | **yes**, in a SOCKS5 UDP association |
 | Sub-server redirect after login | UDP | **yes**, it is a header rewrite |
-| The login page | TCP | **no** — see below |
+| The login page | TCP | **yes**, forwarded without being decrypted |
 
-The game client opens the login page itself, to the `loginurl` address. That
-request never reaches this process, and the hosts file does not redirect it,
-so it goes out from your own connection.
+### The login page
 
-**This means the login and the game session arrive from two different
-addresses.** That is a real difference from playing normally and it is visible
-from the other side. Nothing in this feature changes it. Decide whether you
-want that before turning it on.
+This one is different from the other two, so it is worth a paragraph.
+
+The client opens the login page itself, at the `loginurl` address out of
+`server_data.php`. No call inside this process makes that request, so there is
+nothing here to point at the route. Left alone, the login token is issued to
+*your* address while the game session arrives from the SOCKS5 server's — one
+account showing up in two places, which is exactly the shape a proxy is
+supposed to avoid.
+
+Name resolution is the only lever available, and the proxy already owns the
+hosts file. So the login host is pointed at `127.0.0.2`, where a relay accepts
+the connection and forwards it through the same SOCKS5 server.
+
+**It does not decrypt anything.** The relay holds no certificate and terminates
+no TLS. Your client's handshake runs end to end with the real login server and
+validates the real certificate — which is why nothing has to be installed, and
+why this process could not read your password if it wanted to.
+
+There is another way to do the same job: a local certificate authority, a
+generated certificate for the login host, and TLS terminated in the middle.
+It works, and it costs a private key living in the source tree plus a
+machine-wide trust change on your PC — to read a password there is no reason to
+see. This does not do that.
+
+Turn it off with `login_route = 0` in `socks5.cfg`. Then the login goes out
+from your own address while the game session does not, and you should know that
+is what you chose.
+
+**Private servers.** Many have no login page at all, and some put an address
+rather than a name in `loginurl`. An address cannot be redirected by the hosts
+file, so the proxy says so and stops rather than listening on a socket nothing
+will ever reach; set `login_route = 0` for those.
 
 ---
 
@@ -86,6 +112,13 @@ And one that appears later, after the server list has been fetched:
 **"ASSOCIATE failed — the server refused the request"** — the server works but
 will not relay UDP. Enable UDP on it; the game session cannot go without it.
 
+**"loginurl is an address, not a name"** — the hosts file redirects names, so
+an address cannot be taken over. Common on private servers. Set
+`login_route = 0`.
+
+**"Login relay: could not listen on 127.0.0.2:443"** — something else holds
+that address. Pick another loopback address with `login_ip = 127.0.0.3`.
+
 ---
 
 ## Things worth knowing
@@ -112,7 +145,7 @@ git; the repository's `.gitignore` already excludes it.
 
 ---
 
-## Two details that bite, if you are reading the code
+## Three details that bite, if you are reading the code
 
 **The local UDP socket binds the game server's own port number.** That looks
 arbitrary. It is not: Growtopia's ENet fork encodes the destination port into
@@ -125,3 +158,10 @@ the address its CONNECT arrived from and ignores packets from anywhere else. A
 general-purpose UDP forwarder that opens a fresh association per burst gets a
 new source port each time, and the game server stops answering part-way in.
 Holding one association for the whole session is what avoids that.
+
+**The hosts entry for the login host is written by the relay, not by the
+config.** `editHosts` asks the relay which host it is listening for, and gets
+an empty string when it is not running. So the file can never name a host
+nothing is answering for — which would fail worse than not redirecting at all,
+because the login page would then not load and nothing would say why — and the
+entry clears itself on the way out.

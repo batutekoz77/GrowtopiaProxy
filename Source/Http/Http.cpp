@@ -73,9 +73,21 @@ bool HttpManager::Fetcher() {
     Server.REAL_UDP = static_cast<uint16_t>(std::stoi(port));
 
     if (Route.MODE == gRoute::SOCKS5) {
-        /* @important: fail closed. Falling back to a direct dial here would
-           put the game session on this machine's own address while the
-           operator believes it is routed -- worse than not starting. */
+        /* @important: fail closed, here and below. Falling back to a direct
+           dial would put the traffic on this machine's own address while the
+           operator believes it is routed -- worse than not starting.
+           login_route = 0 is how you say you accept that, on purpose.
+
+           The login page goes first because it is the cheaper failure: at
+           this point nothing has been started and no name has been taken
+           over yet. */
+        if (Route.LOGIN && !System::StartLoginRelay(loginurl)) {
+            LOG_ERROR("Could not carry the login page through the SOCKS5 server.");
+            LOG_ERROR("Set login_route = 0 in socks5.cfg to go on without it --");
+            LOG_ERROR("Docs/socks5.md says what that costs.");
+            return false;
+        }
+
         if (!System::Socks5UdpStart(Server.REAL_IP, Server.REAL_UDP)) {
             LOG_ERROR("Could not carry the game session through the SOCKS5 server.");
             return false;

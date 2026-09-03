@@ -23,6 +23,25 @@ pass = yourpassword
 # Change it only if something else already has this port.
 # http_port = 18080
 
+# The login page. On by default: the client opens it itself, so the proxy
+# makes the login host resolve to a second loopback address and forwards the
+# connection through the same SOCKS5 server. It is forwarded, not decrypted --
+# no certificate is installed and the proxy cannot read what goes through it.
+#
+# Set this to 0 and the login goes out from this machine while the game
+# session comes from the SOCKS5 server, which is one account showing up in
+# two places. Turn it off deliberately, not by accident.
+#
+# Private servers: many have no login page, and some put an address rather
+# than a name in 'loginurl'. An address cannot be redirected by the hosts
+# file, so use login_route = 0 for those.
+# login_route = 0
+
+# Where the login relay listens. Any loopback address that is not 127.0.0.1
+# (which the proxy's own HTTPS server already has). Change it only on a clash.
+# login_ip   = 127.0.0.2
+# login_port = 443
+
 # --- what the server has to support --------------------------------------
 #
 # 1. Username/password authentication (RFC 1929). The proxy offers that
@@ -38,15 +57,13 @@ pass = yourpassword
 #
 # --- what is routed, and what is not -------------------------------------
 #
-#   routed      the server_data.php fetch (TCP), and the ENet game session
-#               (UDP), including the sub-server redirect after login.
+#   routed      the server_data.php fetch (TCP), the ENet game session (UDP)
+#               including the sub-server redirect after login, and the login
+#               page (TCP, forwarded without being decrypted).
 #
-#   NOT routed  the login page. The game client opens that itself, to the
-#               'loginurl' address, and that request never reaches this
-#               process -- the hosts file does not redirect it. It goes out
-#               from this machine directly.
+#   NOT routed  anything else this machine does. This is a route for the
+#               proxy's own traffic, not a system-wide one.
 #
-# So with this on, the login and the game session arrive from two different
-# addresses. That is a real difference from playing normally, it is visible
-# from the other side, and no setting here changes it. Read Docs/socks5.md
+# Your session arrives from the SOCKS5 server's address, so whatever
+# reputation that address has is attached to your play. Read Docs/socks5.md
 # before deciding whether that trade is one you want.

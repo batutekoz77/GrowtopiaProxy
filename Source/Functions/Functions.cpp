@@ -113,6 +113,15 @@ bool System::editHosts(std::string ipAddress) {
     if (!ipAddress.empty()) {
         hostsContent += ipAddress + " www.growtopia1.com\n";
         hostsContent += ipAddress + " www.growtopia2.com\n";
+
+        /* @important: asked of the relay rather than of the config, so the
+           entry exists only while something is actually listening for it.
+           A name pointed at a socket nobody answers is worse than no entry:
+           the login page then fails to load outright, and nothing anywhere
+           says why. It also means this clears itself on the way out. */
+        const std::string login = System::LoginRelayHost();
+        if (!login.empty())
+            hostsContent += Route.LOGIN_IP + " " + login + "\n";
     }
 
     std::ofstream hostsFile(hostsPath, std::ios::trunc);
@@ -385,7 +394,10 @@ namespace {
         return Socks5::SendAll(s, text, static_cast<int>(std::strlen(text)));
     }
 
-    void Pump(SOCKET a, SOCKET b) {
+    /* `run` is the flag of whichever listener owns this pair: the pump has
+       to give up when its own service is being torn down, and there is more
+       than one service now. */
+    void Pump(SOCKET a, SOCKET b, const std::atomic<bool>& run) {
         std::vector<char> buf(16 * 1024);
         for (;;) {
             fd_set r;
@@ -393,7 +405,7 @@ namespace {
             timeval tv{ 1, 0 };
             const int n = ::select(static_cast<int>((a > b ? a : b)) + 1, &r, nullptr, nullptr, &tv);
             if (n < 0) return;
-            if (n == 0) { if (!g_shimRun) return; continue; }
+            if (n == 0) { if (!run) return; continue; }
 
             if (FD_ISSET(a, &r)) {
                 const int k = ::recv(a, buf.data(), static_cast<int>(buf.size()), 0);
@@ -431,7 +443,7 @@ namespace {
         }
 
         SendText(client, "HTTP/1.1 200 Connection Established\r\n\r\n");
-        Pump(client, up);
+        Pump(client, up, g_shimRun);
 
         closesocket(up);
         closesocket(client);
@@ -456,6 +468,100 @@ namespace {
             if (c == INVALID_SOCKET) continue;
 
             std::thread(ServeConnect, c).detach();
+        }
+    }
+
+    /* --- login page relay ----------------------------------------------
+
+       The client opens the login page itself, at the 'loginurl' address out
+       of server_data.php. Nothing in this process makes that request, so
+       there is no call to point at the route -- and left alone it means the
+       login token is issued to this machine's address while the game
+       session arrives from the SOCKS5 server's. One account, two places.
+
+       Name resolution is the lever. The hosts file is already ours, so the
+       login host is pointed at Route.LOGIN_IP, and this listens there:
+       accept, open a SOCKS5 CONNECT to that same host and port, move bytes.
+
+       @important: it does not terminate TLS, and holds no certificate on
+       purpose. The client's handshake runs end to end with the real login
+       server and validates the real certificate, so there is nothing to
+       install and nothing here can read what it carries.
+
+       The other way to do this is a local CA, a generated leaf certificate,
+       and TLS terminated in the middle. It reaches the same result and costs
+       a private key in the source tree plus a machine-wide trust change on
+       the operator's PC -- to read a password we have no reason to see. */
+
+    SOCKET            g_loginFd = INVALID_SOCKET;
+    std::atomic<bool> g_loginRun{ false };
+    std::thread       g_loginThread;
+    std::string       g_loginHost;
+    uint16_t          g_loginPort = 0;
+    std::mutex        g_loginMtx;
+
+    /* 'https://host:8443/path' -> host, 8443. The real server sends a bare
+       name; a private server may well send a URL. */
+    void SplitLoginUrl(const std::string& in, std::string& host, uint16_t& port) {
+        std::string s = in;
+
+        const auto scheme = s.find("://");
+        if (scheme != std::string::npos) s = s.substr(scheme + 3);
+
+        const auto slash = s.find('/');
+        if (slash != std::string::npos) s = s.substr(0, slash);
+
+        const auto colon = s.rfind(':');
+        if (colon != std::string::npos) {
+            const int p = std::atoi(s.c_str() + colon + 1);
+            if (p > 0 && p <= 65535) port = static_cast<uint16_t>(p);
+            s = s.substr(0, colon);
+        }
+        host = s;
+    }
+
+    void ServeLogin(SOCKET client) {
+        std::string host;
+        uint16_t    port = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_loginMtx);
+            host = g_loginHost;
+            port = g_loginPort;
+        }
+
+        Socks5::Status st = Socks5::Status::Protocol;
+        int err = 0;
+        const SOCKET up = Socks5::Connect(RouteConfig(), host, port, 10000, st, err);
+        if (up == INVALID_SOCKET) {
+            /* Nothing can be said in band -- the peer is waiting to begin a
+               TLS handshake, not to read a message. Closing makes the page
+               fail at once instead of hanging, and the log says why. */
+            LOG_ERROR("Login relay: CONNECT to {}:{} through the SOCKS5 server failed: {}",
+                      host, port, Socks5::Explain(st));
+            closesocket(client);
+            return;
+        }
+
+        Pump(client, up, g_loginRun);
+
+        closesocket(up);
+        closesocket(client);
+    }
+
+    void LoginAcceptLoop() {
+        while (g_loginRun) {
+            /* Polled, for the same reason the shim's loop is -- see there. */
+            fd_set r;
+            FD_ZERO(&r);
+            FD_SET(g_loginFd, &r);
+            timeval tv{ 0, 200000 };
+            if (::select(static_cast<int>(g_loginFd) + 1, &r, nullptr, nullptr, &tv) <= 0)
+                continue;
+
+            const SOCKET c = ::accept(g_loginFd, nullptr, nullptr);
+            if (c == INVALID_SOCKET) continue;
+
+            std::thread(ServeLogin, c).detach();
         }
     }
 
@@ -665,6 +771,12 @@ bool System::LoadRouteConfig(const std::string& path) {
         else if (k == "pass")      Route.PASS = v;
         else if (k == "port")      Route.PORT      = static_cast<uint16_t>(std::atoi(v.c_str()));
         else if (k == "http_port") Route.HTTP_PORT = static_cast<uint16_t>(std::atoi(v.c_str()));
+        else if (k == "login_ip")   Route.LOGIN_IP   = v;
+        else if (k == "login_port") Route.LOGIN_PORT = static_cast<uint16_t>(std::atoi(v.c_str()));
+        else if (k == "login_route")
+            /* Anything but an explicit no leaves it on: the default has to be
+               the one that does not split the account across two addresses. */
+            Route.LOGIN = (v != "0" && v != "false" && v != "no");
     }
 
     if (Route.HOST.empty() || Route.PORT == 0 || Route.USER.empty() || Route.PASS.empty()) {
@@ -754,6 +866,99 @@ bool System::StartConnectShim() {
     return true;
 }
 
+std::string System::LoginRelayHost() {
+    if (!g_loginRun) return "";
+    std::lock_guard<std::mutex> lock(g_loginMtx);
+    return g_loginHost;
+}
+
+bool System::StartLoginRelay(const std::string& loginurl) {
+    std::string host;
+    uint16_t    port = Route.LOGIN_PORT;
+    SplitLoginUrl(loginurl, host, port);
+
+    if (host.empty()) {
+        LOG_ERROR("Login relay: server_data.php gave a loginurl we cannot read: '{}'", loginurl);
+        return false;
+    }
+
+    /* @important: the hosts file can only redirect a name. A loginurl that
+       is already an address cannot be taken over at all, so say so rather
+       than starting a listener nothing will ever reach. Private servers put
+       an address there far more often than the real one does. */
+    in_addr probe{};
+    if (::inet_pton(AF_INET, host.c_str(), &probe) == 1) {
+        LOG_ERROR("Login relay: loginurl is an address ({}), not a name.", host);
+        LOG_ERROR("Only names can be redirected, so the login page cannot be routed.");
+        return false;
+    }
+
+    if (g_loginRun) {
+        /* Already listening, and the listener does not care which host it
+           forwards to -- so a changed loginurl is one assignment, the same
+           way the sub-server redirect is on the UDP side. */
+        std::lock_guard<std::mutex> lock(g_loginMtx);
+        g_loginHost = host;
+        g_loginPort = port;
+        return true;
+    }
+
+    WSADATA wsa{};
+    WSAStartup(MAKEWORD(2, 2), &wsa);   /* refcounted; enet has already called it */
+
+    g_loginFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (g_loginFd == INVALID_SOCKET) {
+        LOG_ERROR("Login relay: could not create the socket (winsock {})", WSAGetLastError());
+        return false;
+    }
+
+    sockaddr_in la{};
+    la.sin_family = AF_INET;
+    la.sin_port   = htons(port);
+    ::inet_pton(AF_INET, Route.LOGIN_IP.c_str(), &la.sin_addr);
+
+    if (::bind(g_loginFd, reinterpret_cast<sockaddr*>(&la), sizeof(la)) != 0 ||
+        ::listen(g_loginFd, 8) != 0) {
+        LOG_ERROR("Login relay: could not listen on {}:{} (winsock {})",
+                  Route.LOGIN_IP, port, WSAGetLastError());
+        LOG_ERROR("Something else holds that address. Pick another one with");
+        LOG_ERROR("login_ip = 127.0.0.3 in socks5.cfg.");
+        closesocket(g_loginFd);
+        g_loginFd = INVALID_SOCKET;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_loginMtx);
+        g_loginHost = host;
+        g_loginPort = port;
+    }
+
+    /* @important: only now, because editHosts asks LoginRelayHost() whether
+       to write the redirect and must not be told yes before we can answer. */
+    g_loginRun    = true;
+    g_loginThread = std::thread(LoginAcceptLoop);
+
+    LOG_INFO("Login page {} -> {}:{} -> (socks5) -> {}:{}",
+             host, Route.LOGIN_IP, port, host, port);
+    LOG_INFO("Forwarded, not decrypted: no certificate is installed and this");
+    LOG_INFO("process cannot read what goes through it.");
+    return true;
+}
+
+void System::StopLoginRelay() {
+    g_loginRun = false;
+    if (g_loginThread.joinable()) g_loginThread.join();   /* it polls, so it returns */
+    if (g_loginFd != INVALID_SOCKET) {
+        closesocket(g_loginFd);
+        g_loginFd = INVALID_SOCKET;
+    }
+
+    std::lock_guard<std::mutex> lock(g_loginMtx);
+    g_loginHost.clear();
+    g_loginPort = 0;
+}
+
 bool System::Socks5UdpStart(const std::string& dstIp, uint16_t dstPort) {
     if (g_udpRun) return Socks5UdpRetarget(dstIp, dstPort);
 
@@ -839,6 +1044,7 @@ void System::StopRoute() {
     /* @important: this has to run on every exit path, not just the tidy one.
        See the console control handler in Main.cpp. */
     Socks5UdpStop();
+    StopLoginRelay();
 
     g_shimRun = false;
     if (g_shimThread.joinable()) g_shimThread.join();   /* it polls, so it returns */

@@ -48,13 +48,12 @@ inline gClient Client;
 
 
 /* @note: optional. Sends the proxy's own traffic through a SOCKS5 server
-   instead of straight out: the server_data.php fetch over TCP, and the ENet
-   game session over UDP.
+   instead of straight out: the server_data.php fetch over TCP, the ENet
+   game session over UDP, and the login page the client opens for itself.
 
-   What it does NOT cover: the game client opens its login page to the
-   'loginurl' address itself. That request never reaches this process and is
-   not redirected by the hosts file, so it still goes out directly. Anyone
-   relying on this must know that. */
+   The login page is the odd one out. It is not a call this process makes,
+   so there is nothing here to point at the route -- it is reached by making
+   the name resolve to us and forwarding the bytes on. See LOGIN below. */
 struct gRoute {
     enum Mode { DIRECT = 0, SOCKS5 = 1 };
     int MODE = DIRECT;
@@ -69,6 +68,28 @@ struct gRoute {
     /* Local endpoints the proxy opens for itself. Change only on a clash. */
     std::string LOCAL_IP  = "127.0.0.1";
     uint16_t    HTTP_PORT = 18080;   /* CONNECT shim, for the server_data fetch */
+
+    /* --- the login page ---------------------------------------------------
+       The client opens the 'loginurl' address itself, so no call inside this
+       process can be pointed at the route. Left alone, the login token is
+       issued to this machine's address while the game session arrives from
+       the SOCKS5 server's -- two different places for one account.
+
+       The one lever available is name resolution. The hosts file is already
+       ours, so the login host is pointed at LOGIN_IP and a relay there
+       forwards the connection on through the same SOCKS5 server.
+
+       @important: the relay does not terminate TLS and holds no certificate.
+       The client handshakes end to end with the real login server and checks
+       the real certificate, so nothing has to be installed and this process
+       cannot read what it is carrying.
+
+       LOGIN_IP is a second loopback address because 127.0.0.1:443 is already
+       taken by the proxy's own HTTPS server. Windows routes all of 127/8 to
+       the loopback interface, so no configuration is needed for this. */
+    bool        LOGIN      = true;
+    std::string LOGIN_IP   = "127.0.0.2";
+    uint16_t    LOGIN_PORT = 443;
 };
 inline gRoute Route;
 

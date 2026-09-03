@@ -68,12 +68,25 @@ auto main() -> int {
 
         std::cout << "\n"
                      "   Route: SOCKS5\n"
-                     "\n"
-                     "   What is routed:   the server_data.php fetch, and the\n"
-                     "                     ENet game session.\n"
-                     "   What is NOT:      the game client opens the login page\n"
-                     "                     itself. That request never reaches this\n"
-                     "                     process, so it still goes out directly.\n\n";
+                     "\n";
+
+        if (Route.LOGIN) {
+            std::cout << "   What is routed:   the server_data.php fetch, the ENet\n"
+                         "                     game session, and the login page the\n"
+                         "                     client opens for itself.\n"
+                         "   The login page:   forwarded byte for byte, never\n"
+                         "                     decrypted. This proxy holds no\n"
+                         "                     certificate for it and cannot read it.\n"
+                         "                     login_route = 0 leaves it alone.\n\n";
+        }
+        else {
+            std::cout << "   What is routed:   the server_data.php fetch, and the\n"
+                         "                     ENet game session.\n"
+                         "   What is NOT:      the login page -- login_route = 0. The\n"
+                         "                     client opens it itself, so it goes out\n"
+                         "                     from this PC while the game session\n"
+                         "                     comes from somewhere else.\n\n";
+        }
     }
     else {
         std::cout << "\n   Route: DIRECT\n\n";
