@@ -110,7 +110,12 @@ inline bool ShouldLogNetMessage(int type, int extra = 0) {
             switch (extra) {
                 case Network.LOG_NET_MESSAGE_GAME_PACKET_BASIC: return true;
                 case Network.LOG_NET_MESSAGE_GAME_PACKET_BASIC_CLEAR_SPAM: return true;
-                case Network.LOG_NET_MESSAGE_GAME_PACKET_PLAYER_MOVING: return true;
+                /* @important: movement is per-player, per-tick. One player is
+                   nothing; a crowded world is a different order of magnitude,
+                   and it arrives all at once on world entry. Logging it is the
+                   fireshose that stalls the logger -- and through it, the
+                   network thread (see Logger::push). */
+                case Network.LOG_NET_MESSAGE_GAME_PACKET_PLAYER_MOVING: return false;
                 default: return true;
             }
         }
