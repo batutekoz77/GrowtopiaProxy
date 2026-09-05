@@ -162,7 +162,15 @@ void NetworkManager::Injector() {
                         }
 
                         if (server_peer) {
-                            if (HandlePacket(CLIENT_PROXY_SERVER, PROXY_EVENT.packet, server_peer)) enet_peer_send(server_peer, 0, PROXY_EVENT.packet);
+                            if (HandlePacket(CLIENT_PROXY_SERVER, PROXY_EVENT.packet, server_peer)) {
+                                /* @fix: enet_peer_send takes ownership only on
+                                   success; on failure (< 0) we still own the
+                                   packet and must free it. Leaking here is
+                                   worst exactly when it happens -- under load,
+                                   when memory is already tight. */
+                                if (enet_peer_send(server_peer, 0, PROXY_EVENT.packet) < 0)
+                                    enet_packet_destroy(PROXY_EVENT.packet);
+                            }
                             else enet_packet_destroy(PROXY_EVENT.packet);
                         }
 
@@ -210,7 +218,13 @@ void NetworkManager::Injector() {
                         }
 
                         if (client_peer) {
-                            if (HandlePacket(SERVER_PROXY_CLIENT, SERVER_EVENT.packet, client_peer)) enet_peer_send(client_peer, 0, SERVER_EVENT.packet);
+                            if (HandlePacket(SERVER_PROXY_CLIENT, SERVER_EVENT.packet, client_peer)) {
+                                /* @fix: same ownership rule as the other
+                                   direction -- free the packet if the send
+                                   failed, it is still ours. */
+                                if (enet_peer_send(client_peer, 0, SERVER_EVENT.packet) < 0)
+                                    enet_packet_destroy(SERVER_EVENT.packet);
+                            }
                             else enet_packet_destroy(SERVER_EVENT.packet);
                         }
 
