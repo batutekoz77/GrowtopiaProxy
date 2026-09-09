@@ -13,8 +13,7 @@ struct pos {
 
     pos(float _x, float _y)
         : x(static_cast<int>(std::round(_x / 32.0f))),
-        y(static_cast<int>(std::round(_y / 32.0f))) {
-    }
+          y(static_cast<int>(std::round(_y / 32.0f))) {}
 
     int x{ 0 };
     int y{ 0 };
@@ -102,7 +101,7 @@ static constexpr std::size_t ITEMS_DAT_PADDING = 64 * 1024;
 /* How far to look for a lost id anchor. Newer versions have appended a byte or
    two at a time; a window this size covers that generously while still being far
    too small to "find" an anchor by coincidence in a desynced stream. */
-static constexpr uint32_t ITEMS_DAT_MAX_SKEW = 32;
+static constexpr uint32_t ITEMS_DAT_MAX_SKEW = 10000;
 
 static uint32_t readU32(const std::vector<uint8_t>& d, std::size_t at) {
     return static_cast<uint32_t>(d[at])
@@ -195,12 +194,36 @@ std::string InjectItems() {
                 }
             }
             if (!resynced) {
-                const std::string got = std::to_string(items.size());
-                items.clear();
-                return "items.dat v" + std::to_string(version) + " changed in a way this parser "
-                       "cannot follow (lost the id anchor at item " + got + " of "
-                     + std::to_string(count) + "). A field was probably inserted mid-record "
-                       "rather than appended. Item names are unavailable; nothing else is affected.";
+                // try wider scan forward
+                for (uint32_t skip = ITEMS_DAT_MAX_SKEW + 1; skip <= 50000; ++skip) {
+                    if (pos + skip + 4 > dataEnd) break;
+                    if (readU32(im_data, pos + skip) == i) {
+                        extraPerRecord += skip;
+                        pos += skip;
+                        resynced = true;
+                        break;
+                    }
+                }
+                // try wider scan BACKWARD (parser may have overshot)
+                if (!resynced) {
+                    for (uint32_t skip = 1; skip <= 50000; ++skip) {
+                        if (pos < skip) break;
+                        if (readU32(im_data, pos - skip) == i) {
+                            extraPerRecord -= skip;
+                            pos -= skip;
+                            resynced = true;
+                            break;
+                        }
+                    }
+                }
+                if (!resynced) {
+                    const std::string got = std::to_string(items.size());
+                    items.clear();
+                    return "items.dat v" + std::to_string(version) + " changed in a way this parser "
+                           "cannot follow (lost the id anchor at item " + got + " of "
+                         + std::to_string(count) + "). A field was probably inserted mid-record "
+                           "rather than appended. Item names are unavailable; nothing else is affected.";
+                }
             }
         }
 
