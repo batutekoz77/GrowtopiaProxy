@@ -284,7 +284,21 @@ public:
                             uint16_t newServerUDP = static_cast<uint16_t>(std::get<int>(param[1]));
                             std::string newServerIP = Packet::ExtractCustom<std::string>(std::get<std::string>(param[4]), "", 0, "|");
 
-                            if (enet_address_set_host_ip(&Network.GetServerAddress(), newServerIP.c_str()) < 0) {
+                            /* @note: after login the server hands the client
+                               to a different sub-server. On the SOCKS5 route
+                               that costs one header rewrite, because the
+                               destination travels in each datagram rather
+                               than in a route -- and ENet keeps talking to
+                               the same local socket. */
+                            if (Route.MODE == gRoute::SOCKS5) {
+                                if (!System::Socks5UdpRetarget(newServerIP, newServerUDP))
+                                    return "Could not retarget the SOCKS5 UDP association!";
+
+                                if (enet_address_set_host_ip(&Network.GetServerAddress(), Route.LOCAL_IP.c_str()) != 0) {
+                                    return "Invalid local address for OnSendToServer!";
+                                }
+                            }
+                            else if (enet_address_set_host_ip(&Network.GetServerAddress(), newServerIP.c_str()) != 0) {
                                 return "Invalid newServerIP IP for OnSendToServer!";
                             }
                             Network.GetServerAddress().port = newServerUDP;
