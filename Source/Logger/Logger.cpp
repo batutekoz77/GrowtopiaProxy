@@ -67,7 +67,12 @@ namespace FastLog {
         writer_ = std::thread(&Logger::writer_loop, this);
 
         HANDLE hWriter = (HANDLE)writer_.native_handle();
-        SetThreadPriority(hWriter, THREAD_PRIORITY_BELOW_NORMAL);
+        /* @important: the writer must not run BELOW the threads it serves.
+           The network thread is TIME_CRITICAL and pinned to one core; a
+           producer spin-waiting on a slower consumer is a priority inversion
+           (see Logger::push). Normal priority is enough -- the queue is what
+           absorbs bursts, not thread scheduling. */
+        SetThreadPriority(hWriter, THREAD_PRIORITY_NORMAL);
     }
 
     void Logger::stop() noexcept {
@@ -95,7 +100,15 @@ namespace FastLog {
         uint32_t index = write_index_.fetch_add(1, std::memory_order_relaxed);
         Slot& slot = queue_[index % QUEUE_SIZE];
 
-        while (slot.ready.load(std::memory_order_acquire)) std::this_thread::yield();
+        /* @important: if the slot is still ready the writer has not caught up.
+           Do NOT wait for it -- the caller here is the network thread, and
+           every moment spent spinning is a moment enet_host_service is not
+           called, which times out both peers and ends sessions in crowded
+           worlds. Drop the message and say so when the writer drains. */
+        if (slot.ready.load(std::memory_order_acquire)) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
 
         slot.level = lvl;
         slot.size = static_cast<uint32_t>(size);
@@ -120,6 +133,14 @@ namespace FastLog {
             Slot& slot = queue_[index % QUEUE_SIZE];
 
             if (!slot.ready.load(std::memory_order_acquire)) {
+                /* Queue drained: report anything that was dropped under load.
+                   The writer writes straight to stdout, so this cannot recurse
+                   into the queue. */
+                const auto dropped = dropped_.exchange(0, std::memory_order_relaxed);
+                if (dropped) {
+                    std::printf("\033[33m[WARN ] [LOGGER] %llu log line(s) dropped under load.\033[0m\n",
+                                static_cast<unsigned long long>(dropped));
+                }
                 std::this_thread::yield();
                 continue;
             }

@@ -77,6 +77,7 @@ namespace FastLog {
         std::array<Slot, QUEUE_SIZE> queue_;
         alignas(64) std::atomic<uint32_t> write_index_{ 0 };
         alignas(64) std::atomic<uint32_t> read_index_{ 0 };
+        std::atomic<uint64_t> dropped_{ 0 };   /* messages dropped when the ring was full */
         std::atomic<bool> running_{ false };
         std::thread writer_;
 
