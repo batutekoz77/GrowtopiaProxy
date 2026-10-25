@@ -102,13 +102,13 @@ static constexpr std::size_t ITEMS_DAT_PADDING = 64 * 1024;
 /* How far to look for a lost id anchor. Newer versions have appended a byte or
    two at a time; a window this size covers that generously while still being far
    too small to "find" an anchor by coincidence in a desynced stream. */
-static constexpr uint32_t ITEMS_DAT_MAX_SKEW = 32;
+static constexpr uint32_t ITEMS_DAT_MAX_SKEW = 10000;
 
 static uint32_t readU32(const std::vector<uint8_t>& d, std::size_t at) {
     return static_cast<uint32_t>(d[at])
-         | (static_cast<uint32_t>(d[at + 1]) << 8)
-         | (static_cast<uint32_t>(d[at + 2]) << 16)
-         | (static_cast<uint32_t>(d[at + 3]) << 24);
+        | (static_cast<uint32_t>(d[at + 1]) << 8)
+        | (static_cast<uint32_t>(d[at + 2]) << 16)
+        | (static_cast<uint32_t>(d[at + 3]) << 24);
 }
 
 std::string InjectItems() {
@@ -127,14 +127,14 @@ std::string InjectItems() {
     const auto size = std::filesystem::file_size(path, ec);
     if (ec || size == 0) {
         return "items.dat not readable at '" + path + "' (" + ec.message() + "). "
-               "Item names are unavailable; everything else still works.";
+            "Item names are unavailable; everything else still works.";
     }
 
     im_data = compress_state(::state{
         .type = 0x10,
         .peer_state = 0x08,
         .size = static_cast<int>(size)
-    });
+        });
 
     const std::size_t dataEnd = im_data.size() + size;   /* end of real content */
     im_data.resize(dataEnd + ITEMS_DAT_PADDING);          /* + slack, zeroed */
@@ -165,7 +165,7 @@ std::string InjectItems() {
 
     if (version > ITEMS_DAT_MAX_VERSION) {
         note = " [v" + std::to_string(version) + " is newer than the v"
-             + std::to_string(ITEMS_DAT_MAX_VERSION) + " layout this parser knows]";
+            + std::to_string(ITEMS_DAT_MAX_VERSION) + " layout this parser knows]";
     }
     static constexpr std::string_view token{ "PBG892FXX982ABC*" };
     for (uint16_t i = 0; i < count; ++i) {
@@ -176,8 +176,8 @@ std::string InjectItems() {
             const std::string got = std::to_string(items.size());
             items.clear();
             return "items.dat parse ran off the end after " + got + " of " + std::to_string(count)
-                 + " items (v" + std::to_string(version) + "). Item names are unavailable; "
-                   "nothing else is affected.";
+                + " items (v" + std::to_string(version) + "). Item names are unavailable; "
+                "nothing else is affected.";
         }
 
         /* The anchor: this record must start with its own id. */
@@ -195,12 +195,36 @@ std::string InjectItems() {
                 }
             }
             if (!resynced) {
-                const std::string got = std::to_string(items.size());
-                items.clear();
-                return "items.dat v" + std::to_string(version) + " changed in a way this parser "
-                       "cannot follow (lost the id anchor at item " + got + " of "
-                     + std::to_string(count) + "). A field was probably inserted mid-record "
-                       "rather than appended. Item names are unavailable; nothing else is affected.";
+                // try wider scan forward
+                for (uint32_t skip = ITEMS_DAT_MAX_SKEW + 1; skip <= 50000; ++skip) {
+                    if (pos + skip + 4 > dataEnd) break;
+                    if (readU32(im_data, pos + skip) == i) {
+                        extraPerRecord += skip;
+                        pos += skip;
+                        resynced = true;
+                        break;
+                    }
+                }
+                // try wider scan BACKWARD (parser may have overshot)
+                if (!resynced) {
+                    for (uint32_t skip = 1; skip <= 50000; ++skip) {
+                        if (pos < skip) break;
+                        if (readU32(im_data, pos - skip) == i) {
+                            extraPerRecord -= skip;
+                            pos -= skip;
+                            resynced = true;
+                            break;
+                        }
+                    }
+                }
+                if (!resynced) {
+                    const std::string got = std::to_string(items.size());
+                    items.clear();
+                    return "items.dat v" + std::to_string(version) + " changed in a way this parser "
+                        "cannot follow (lost the id anchor at item " + got + " of "
+                        + std::to_string(count) + "). A field was probably inserted mid-record "
+                        "rather than appended. Item names are unavailable; nothing else is affected.";
+                }
             }
         }
 
@@ -342,8 +366,8 @@ std::string InjectItems() {
     }
     ALREADY_INJECTED = true;
     return "Injected " + std::to_string(items.size()) + " items from the items.dat v"
-         + std::to_string(version)
-         + (extraPerRecord ? " (+" + std::to_string(extraPerRecord)
-                             + " byte(s)/record learned from the file itself)" : "")
-         + note;
+        + std::to_string(version)
+        + (extraPerRecord ? " (+" + std::to_string(extraPerRecord)
+            + " byte(s)/record learned from the file itself)" : "")
+        + note;
 }
